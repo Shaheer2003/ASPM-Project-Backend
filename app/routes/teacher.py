@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from app.database import get_db
 from app.models import User, Student, Teacher, AttendanceRecord, MarksRecord, Course, AttendanceStatus, Session as SessionEnum
 from app.schemas import (
@@ -8,9 +8,30 @@ from app.schemas import (
     UpsertMarksRequest, AttendanceRecordResponse
 )
 from app.auth.dependencies import get_current_user, require_role
-from app.routes.utils import generate_id, compute_marks_summary, get_teacher_by_id
+from app.routes.utils import generate_id, compute_marks_summary, get_teacher_by_id, get_student_overview
 
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
+
+
+@router.get("/profile", response_model=Dict[str, Any])
+async def get_teacher_profile(
+    current_user: User = Depends(require_role("Teacher")),
+    db: Session = Depends(get_db)
+):
+    """Get teacher profile and assigned classes."""
+    teacher = get_teacher_by_id(current_user.id, db)
+    if not teacher:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Teacher profile not found."
+        )
+
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "assigned_classes": teacher.assigned_classes or []
+    }
 
 
 @router.post("/attendance", response_model=GenericResponse)
@@ -58,7 +79,7 @@ async def mark_attendance(
             class_code=request.class_code,
             course_code=course_code,
             date=request.date,
-            session=entry.status,
+            session=request.session,
             status=entry.status,
             teacher_id=current_user.id
         )
@@ -70,6 +91,39 @@ async def mark_attendance(
         ok=True,
         message="Attendance saved successfully."
     )
+
+
+@router.get("/attendance", response_model=Dict[str, Any])
+async def list_attendance(
+    class_code: Optional[str] = Query(None),
+    date: Optional[str] = Query(None),
+    current_user: User = Depends(require_role("Teacher")),
+    db: Session = Depends(get_db)
+):
+    """List attendance records for the current teacher."""
+    query = db.query(AttendanceRecord).filter(AttendanceRecord.teacher_id == current_user.id)
+
+    if class_code:
+        query = query.filter(AttendanceRecord.class_code == class_code)
+    if date:
+        query = query.filter(AttendanceRecord.date == date)
+
+    records = query.all()
+    return {
+        "records": [
+            {
+                "id": record.id,
+                "student_id": record.student_id,
+                "class_code": record.class_code,
+                "course_code": record.course_code,
+                "date": record.date,
+                "session": record.session,
+                "status": record.status,
+                "teacher_id": record.teacher_id
+            }
+            for record in records
+        ]
+    }
 
 
 @router.put("/attendance/{record_id}", response_model=GenericResponse)
@@ -161,6 +215,42 @@ async def upsert_marks(
     )
 
 
+@router.get("/marks", response_model=Dict[str, Any])
+async def get_marks(
+    class_code: Optional[str] = Query(None),
+    course_code: Optional[str] = Query(None),
+    current_user: User = Depends(require_role("Teacher")),
+    db: Session = Depends(get_db)
+):
+    """Get marks records for the current teacher."""
+    query = db.query(MarksRecord).filter(MarksRecord.teacher_id == current_user.id)
+
+    if class_code:
+        query = query.filter(MarksRecord.class_code == class_code)
+    if course_code:
+        query = query.filter(MarksRecord.course_code == course_code)
+
+    records = query.all()
+
+    report_rows = []
+    for record in records:
+        summary = compute_marks_summary(record)
+        report_rows.append({
+            "id": record.id,
+            "student_id": record.student_id,
+            "course_code": record.course_code,
+            "class_code": record.class_code,
+            "assessments": record.assessments,
+            "totals": record.totals,
+            **summary
+        })
+
+    return {
+        "records": report_rows,
+        "total": len(report_rows)
+    }
+
+
 @router.get("/students", response_model=List[dict])
 async def get_class_students(
     class_code: str,
@@ -187,3 +277,42 @@ async def get_class_students(
         }
         for s in students
     ]
+
+
+@router.get("/student-overview", response_model=Dict[str, Any])
+async def get_student_overview_for_teacher(
+    student_id: str,
+    current_user: User = Depends(require_role("Teacher")),
+    db: Session = Depends(get_db)
+):
+    """Get overview for a student in the teacher's assigned classes."""
+    teacher = get_teacher_by_id(current_user.id, db)
+    student = db.query(Student).filter(Student.id == student_id).first()
+
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Student not found."
+        )
+
+    if teacher and student.class_code not in (teacher.assigned_classes or []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this student."
+        )
+
+    overview = get_student_overview(student_id, db)
+
+    return {
+        "student": {
+            "id": student.id,
+            "name": student.user.name if student.user else "",
+            "email": student.user.email if student.user else "",
+            "phone": student.phone,
+            "department": student.department,
+            "batch": student.batch,
+            "class_code": student.class_code
+        },
+        "mark_rows": overview["mark_rows"],
+        "attendance_rows": overview["attendance_rows"]
+    }

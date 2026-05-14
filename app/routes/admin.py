@@ -133,6 +133,42 @@ async def register_teacher(
     )
 
 
+@router.put("/teachers/{teacher_id}", response_model=GenericResponse)
+async def update_teacher(
+    teacher_id: str,
+    request: TeacherUpdate,
+    current_user: User = Depends(require_role("Admin")),
+    db: Session = Depends(get_db)
+):
+    """Update teacher name and/or department."""
+    user = db.query(User).filter(User.id == teacher_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Teacher not found."
+        )
+
+    if request.name:
+        user.name = request.name.strip()
+    if request.department:
+        user.department = request.department.strip()
+    if request.email:
+        user.email = request.email
+    if request.assigned_classes is not None:
+        teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
+        if teacher:
+            teacher.assigned_classes = request.assigned_classes
+            db.add(teacher)
+
+    db.add(user)
+    db.commit()
+
+    return GenericResponse(
+        ok=True,
+        message="Teacher record updated successfully."
+    )
+
+
 @router.put("/students/{student_id}", response_model=GenericResponse)
 async def update_student(
     student_id: str,
